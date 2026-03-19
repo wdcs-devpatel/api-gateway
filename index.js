@@ -1,12 +1,14 @@
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
+const { createProxyMiddleware, fixRequestBody } = require('http-proxy-middleware');
 const cors = require('cors');
 
 const app = express();
 
 app.use(cors());
+app.use(express.json()); // 📝 Support parsing for proxy stream reconstruction
+
 // 📝 1. Logging Middleware (Request Inspection)
 app.use((req, res, next) => {
   console.log(`[Gateway] ${req.method} ${req.url}`);
@@ -17,9 +19,17 @@ app.use((req, res, next) => {
 const proxyOptions = (target) => ({
   target,
   changeOrigin: true,
-  onError: (err, req, res) => {
-    console.error(`[Gateway Error] Failed proxying ${req.method} ${req.url} -> ${target}:`, err.message);
-    res.status(503).json({ message: 'Service unavailable: Downstream failure' });
+  on: {
+    proxyReq: (proxyReq, req, res, options) => {
+      const contentType = req.headers['content-type'];
+      if (contentType && contentType.includes('application/json')) {
+        fixRequestBody(proxyReq, req, res, options);
+      }
+    },
+    error: (err, req, res) => {
+      console.error(`[Gateway Error] Failed proxying ${req.method} ${req.url} -> ${target}:`, err.message);
+      res.status(503).json({ message: 'Service unavailable: Downstream failure' });
+    }
   }
 });
 
@@ -32,7 +42,11 @@ const postgresRoutes = ['/api/auth', '/api/projects', '/api/tasks', '/api/users'
 postgresRoutes.forEach(prefix => {
   app.use(prefix, createProxyMiddleware({
     ...proxyOptions(process.env.POSTGRES_SERVICE),
-    pathRewrite: (path) => `${prefix}${path}`
+    pathRewrite: (path) => {
+      const rewritten = `${prefix}${path}`;
+      console.log(`[Proxy Postgres] ${prefix} + ${path} -> ${rewritten}`);
+      return rewritten;
+    }
   }));
 });
 
@@ -41,7 +55,11 @@ const mongoRoutes = ['/api/viewer', '/api/backlogs', '/api/attachments', '/api/a
 mongoRoutes.forEach(prefix => {
   app.use(prefix, createProxyMiddleware({
     ...proxyOptions(process.env.MONGO_SERVICE),
-    pathRewrite: (path) => `${prefix}${path}`
+    pathRewrite: (path) => {
+      const rewritten = `${prefix}${path}`;
+      console.log(`[Proxy Mongo] ${prefix} + ${path} -> ${rewritten}`);
+      return rewritten;
+    }
   }));
 });
 
